@@ -1,43 +1,61 @@
 import streamlit as st
-import requests
 import pandas as pd
-import matplotlib.pyplot as plt
+import requests
 from transformers import pipeline
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import udf, col, when
+from pyspark.sql.types import IntegerType
 
-# ---- SETUP ----
+# 1️⃣ Spark Session
+spark = SparkSession.builder.appName("LiveNewsSentiment").getOrCreate()
+
 st.set_page_config(page_title="Live News Sentiment", layout="wide")
 st.title("🗞️ Live News Sentiment Analysis (India)")
-st.markdown("Built with GNews API + HuggingFace Transformers + Streamlit")
 
-# ---- HARDCODE YOUR API KEY HERE ----
-api_key = "9182b91bcc242891443b3bf69c37b121"  # 👈 Replace this with your real key (keep private if public repo)
+# 2️⃣ API Key input
+api_key = st.text_input("Enter your GNews API Key:")
 
-# ---- FETCH NEWS ----
-try:
-    url = f"https://gnews.io/api/v4/top-headlines?lang=en&country=in&max=30&apikey={api_key}"
-    res = requests.get(url).json()
-    headlines = [article["title"] for article in res["articles"] if "title" in article]
-    df = pd.DataFrame(headlines, columns=["headline"])
+if api_key:
+    try:
+        # 3️⃣ Fetch news
+        url = f"https://gnews.io/api/v4/top-headlines?lang=en&country=in&max=50&apikey={api_key}
+        data = requests.get(url).json()
+        headlines = [article["title"] for article in data["articles"] if "title" in article]
+        df = pd.DataFrame(headlines, columns=["headline"])
+        news_df = spark.createDataFrame(df)
 
-    # ---- SENTIMENT ANALYSIS ----
-    sentiment_pipeline = pipeline("sentiment-analysis")
-    df["sentiment"] = df["headline"].apply(lambda x: sentiment_pipeline(x[:512])[0]['label'].lower())
+        # 4️⃣ HuggingFace pre-trained model for pseudo-labels
+        hf_model = pipeline("sentiment-analysis")
+        def hf_to_label(text):
+            result = hf_model(text[:512])[0]
+            return 1 if result['label'].lower() == 'positive' else 0
+        hf_label_udf = udf(hf_to_label, IntegerType())
+        news_df = news_df.withColumn("label", hf_label_udf(news_df["headline"]))
 
-    # ---- SHOW TABLE ----
-    st.subheader("📰 Headlines with Sentiment")
-    st.dataframe(df)
+        # 5️⃣ PySpark ML pipeline
+        from pyspark.ml import Pipeline
+        from pyspark.ml.feature import Tokenizer, StopWordsRemover, CountVectorizer
+        from pyspark.ml.classification import LogisticRegression
 
-    # ---- SHOW BAR CHART ----
-    st.subheader("📊 Sentiment Distribution")
+        tokenizer = Tokenizer(inputCol="headline", outputCol="words")
+        stopwords_remover = StopWordsRemover(inputCol="words", outputCol="filtered")
+        vectorizer = CountVectorizer(inputCol="filtered", outputCol="features")
+        lr = LogisticRegression(featuresCol="features", labelCol="label")
 
-    sentiment_counts = df["sentiment"].value_counts()
-    fig, ax = plt.subplots(figsize=(8, 5))
-    sentiment_counts.plot(kind='bar', color=["green", "red", "gray"], ax=ax)
-    ax.set_xlabel("Sentiment", fontsize=12)
-    ax.set_ylabel("Number of Headlines", fontsize=12)
-    ax.set_title("Sentiment Analysis of Latest News", fontsize=14)
-    st.pyplot(fig)
+        pipeline = Pipeline(stages=[tokenizer, stopwords_remover, vectorizer, lr])
+        model = pipeline.fit(news_df)
 
-except Exception as e:
-    st.error(f"❌ Something went wrong: {e}")
+        predictions = model.transform(news_df)
+        predictions = predictions.withColumn("sentiment", when(col("prediction")==1, "positive").otherwise("negative"))
+        pred_df = predictions.select("headline", "sentiment").toPandas()
+
+        # 6️⃣ Display in Streamlit
+        st.success("✅ News fetched and analyzed!")
+        st.dataframe(pred_df)
+
+        # 7️⃣ Sentiment bar chart
+        st.bar_chart(pred_df['sentiment'].value_counts())
+
+    except Exception as e:
+        st.error(f"Error: {e}")
 
