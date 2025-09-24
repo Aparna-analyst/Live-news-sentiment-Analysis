@@ -18,7 +18,7 @@ api_key = st.text_input("Enter your GNews API Key:")
 if api_key:
     try:
         # 3️⃣ Fetch news
-        url = f"https://gnews.io/api/v4/top-headlines?lang=en&country=in&max=50&apikey={api_key}
+        url = f"https://gnews.io/api/v4/top-headlines?lang=en&country=in&max=50&apikey={api_key}"
         data = requests.get(url).json()
         headlines = [article["title"] for article in data["articles"] if "title" in article]
         df = pd.DataFrame(headlines, columns=["headline"])
